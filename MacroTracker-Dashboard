@@ -1,0 +1,263 @@
+// ============================================
+// TV MACRO TRACKER - DASHBOARD
+// Version 2.0
+// ============================================
+
+// DAILY MACRO GOALS
+const GOALS = {
+  calories: 2500,
+  protein: 200,
+  carbs: 200,
+  fat: 50
+};
+
+// ============================================
+// STORAGE
+// ============================================
+
+const fm = FileManager.iCloud();
+
+const folder = fm.joinPath(
+  fm.documentsDirectory(),
+  "MacroTracker"
+);
+
+const logPath = fm.joinPath(
+  folder,
+  "food_log.json"
+);
+
+// ============================================
+// LOAD FOOD HISTORY
+// ============================================
+
+let entries = [];
+let loadError = false;
+
+try {
+  if (fm.fileExists(logPath)) {
+    await fm.downloadFileFromiCloud(logPath);
+
+    const data = JSON.parse(
+      fm.readString(logPath)
+    );
+
+    if (!Array.isArray(data)) {
+      throw new Error("Invalid food history");
+    }
+
+    entries = data;
+  }
+} catch (error) {
+  loadError = true;
+  console.log("Food history error: " + error);
+}
+
+// ============================================
+// CALCULATE TODAY'S TOTALS
+// ============================================
+
+const today = new Date().toDateString();
+
+const totals = {
+  calories: 0,
+  protein: 0,
+  carbs: 0,
+  fat: 0
+};
+
+for (const entry of entries) {
+  if (!entry.timestamp) continue;
+
+  const date = new Date(entry.timestamp);
+
+  if (isNaN(date.getTime())) continue;
+
+  if (date.toDateString() === today) {
+    totals.calories += Number(entry.calories) || 0;
+    totals.protein += Number(entry.protein) || 0;
+    totals.carbs += Number(entry.carbs) || 0;
+    totals.fat += Number(entry.fat) || 0;
+  }
+}
+
+// ============================================
+// WIDGET SETUP
+// ============================================
+
+const widget = new ListWidget();
+
+widget.backgroundColor = new Color("#111111");
+widget.setPadding(12, 16, 12, 16);
+
+// Header
+const header = widget.addStack();
+header.layoutHorizontally();
+header.centerAlignContent();
+
+const title = header.addText("Today's Macros");
+title.font = Font.boldSystemFont(15);
+title.textColor = Color.white();
+
+header.addSpacer();
+
+const dateText = header.addText(
+  new Date().toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric"
+  })
+);
+
+dateText.font = Font.mediumSystemFont(10);
+dateText.textColor = new Color("#999999");
+
+widget.addSpacer(10);
+
+// ============================================
+// PROGRESS BAR GENERATOR
+// ============================================
+
+function makeProgressBar(consumed, goal, color) {
+  const width = 500;
+  const height = 12;
+
+  const context = new DrawContext();
+  context.size = new Size(width, height);
+  context.opaque = false;
+  context.respectScreenScale = true;
+
+  const background = new Path();
+  background.addRoundedRect(
+    new Rect(0, 0, width, height),
+    height / 2,
+    height / 2
+  );
+
+  context.addPath(background);
+  context.setFillColor(new Color("#333333"));
+  context.fillPath();
+
+  const ratio = Math.max(
+    0,
+    Math.min(consumed / goal, 1)
+  );
+
+  if (ratio > 0) {
+    const fill = new Path();
+
+    fill.addRoundedRect(
+      new Rect(0, 0, width * ratio, height),
+      Math.min(height / 2, width * ratio / 2),
+      Math.min(height / 2, width * ratio / 2)
+    );
+
+    context.addPath(fill);
+    context.setFillColor(new Color(color));
+    context.fillPath();
+  }
+
+  return context.getImage();
+}
+
+// ============================================
+// MACRO ROW GENERATOR
+// ============================================
+
+function addMacroRow(label, consumed, goal, color) {
+  const row = widget.addStack();
+  row.layoutVertically();
+
+  const top = row.addStack();
+  top.layoutHorizontally();
+  top.centerAlignContent();
+
+  const name = top.addText(label);
+  name.font = Font.mediumSystemFont(11);
+  name.textColor = new Color("#CCCCCC");
+
+  top.addSpacer();
+
+  const amount = top.addText(
+    Math.round(consumed) + " / " + goal
+  );
+
+  amount.font = Font.semiboldSystemFont(12);
+  amount.textColor = Color.white();
+
+  row.addSpacer(4);
+
+  const bar = row.addImage(
+    makeProgressBar(consumed, goal, color)
+  );
+
+  bar.imageSize = new Size(300, 6);
+
+  widget.addSpacer(9);
+}
+
+// ============================================
+// DISPLAY MACROS
+// ============================================
+
+addMacroRow(
+  "Calories",
+  totals.calories,
+  GOALS.calories,
+  "#4ADE80"
+);
+
+addMacroRow(
+  "Protein",
+  totals.protein,
+  GOALS.protein,
+  "#60A5FA"
+);
+
+addMacroRow(
+  "Carbs",
+  totals.carbs,
+  GOALS.carbs,
+  "#FACC15"
+);
+
+addMacroRow(
+  "Fat",
+  totals.fat,
+  GOALS.fat,
+  "#FB923C"
+);
+
+// ============================================
+// ERROR MESSAGE
+// ============================================
+
+if (loadError) {
+  const warning = widget.addText(
+    "Unable to load food history"
+  );
+
+  warning.font = Font.systemFont(9);
+  warning.textColor = new Color("#FF7777");
+}
+
+// ============================================
+// REFRESH SETTINGS
+// ============================================
+
+// Request refresh every 15 minutes.
+// iOS controls the actual refresh schedule.
+widget.refreshAfterDate = new Date(
+  Date.now() + 15 * 60 * 1000
+);
+
+// ============================================
+// DISPLAY
+// ============================================
+
+Script.setWidget(widget);
+
+if (!config.runsInWidget) {
+  await widget.presentMedium();
+}
+
+Script.complete();

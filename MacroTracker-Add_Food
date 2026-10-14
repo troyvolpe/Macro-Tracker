@@ -1,0 +1,2129 @@
+// ============================================
+// TV MACRO TRACKER - VERSION 4.2
+// Food Logging, Favorites, History,
+// Editing, Weekly Analytics,
+// Weight Tracking,
+// Automatic 8 PM Notification
+// ============================================
+
+const GOALS = {
+  calories: 2400,
+  protein: 200,
+  carbs: 250,
+  fat: 65
+};
+
+const NOTIFICATION_HOUR = 20;
+const NOTIFICATION_MINUTE = 0;
+
+const NOTIFICATION_ID =
+  "macro-summary";
+
+// ============================================
+// FILE STORAGE
+// ============================================
+
+const fm = FileManager.iCloud();
+
+const folder = fm.joinPath(
+  fm.documentsDirectory(),
+  "MacroTracker"
+);
+
+const logPath = fm.joinPath(
+  folder,
+  "food_log.json"
+);
+
+const savedPath = fm.joinPath(
+  folder,
+  "saved_foods.json"
+);
+
+const weightPath = fm.joinPath(
+  folder,
+  "weight_log.json"
+);
+
+if (!fm.fileExists(folder)) {
+  fm.createDirectory(folder, true);
+}
+
+async function readArray(path) {
+  if (!fm.fileExists(path)) {
+    return [];
+  }
+
+  await fm.downloadFileFromiCloud(path);
+
+  const data = JSON.parse(
+    fm.readString(path)
+  );
+
+  if (!Array.isArray(data)) {
+    throw new Error(
+      "Invalid data format in " + path
+    );
+  }
+
+  return data;
+}
+
+let entries;
+let savedFoods;
+let weightEntries;
+
+try {
+  entries = await readArray(logPath);
+  savedFoods = await readArray(savedPath);
+  weightEntries = await readArray(weightPath);
+} catch (error) {
+  throw new Error(
+    "Unable to load tracker data. " +
+    "Your existing files were preserved. " +
+    error
+  );
+}
+
+// ============================================
+// UTILITIES
+// ============================================
+
+function round(value) {
+  return Math.round(
+    (Number(value) || 0) * 10
+  ) / 10;
+}
+
+function localDateKey(date) {
+  return (
+    date.getFullYear() + "-" +
+    String(date.getMonth() + 1)
+      .padStart(2, "0") + "-" +
+    String(date.getDate())
+      .padStart(2, "0")
+  );
+}
+
+function totalsForDate(data, key) {
+  const totals = {
+    calories: 0,
+    protein: 0,
+    carbs: 0,
+    fat: 0
+  };
+
+  for (const entry of data) {
+    const date = new Date(entry.timestamp);
+
+    if (isNaN(date.getTime())) {
+      continue;
+    }
+
+    if (localDateKey(date) !== key) {
+      continue;
+    }
+
+    for (const macro of Object.keys(totals)) {
+      totals[macro] +=
+        Number(entry[macro]) || 0;
+    }
+  }
+
+  return totals;
+}
+
+function safeJSON(value) {
+  return JSON.stringify(value)
+    .replace(/</g, "\\u003c")
+    .replace(/>/g, "\\u003e")
+    .replace(/&/g, "\\u0026")
+    .replace(/\u2028/g, "\\u2028")
+    .replace(/\u2029/g, "\\u2029");
+}
+
+// ============================================
+// HTML INTERFACE
+// ============================================
+
+const html = `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport"
+content="width=device-width, initial-scale=1">
+
+<style>
+:root { color-scheme: dark; }
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 20px 18px 40px;
+  background: #111;
+  color: #fff;
+  font-family: -apple-system,
+    BlinkMacSystemFont, sans-serif;
+}
+
+h1 {
+  font-size: 27px;
+  margin: 0 0 5px;
+}
+
+.subtitle {
+  color: #999;
+  font-size: 13px;
+  margin-bottom: 22px;
+}
+
+h2 {
+  font-size: 19px;
+  margin: 0 0 14px;
+}
+
+.section { margin-top: 24px; }
+
+.card {
+  background: #1e1e1e;
+  border: 1px solid #303030;
+  border-radius: 14px;
+  padding: 15px;
+  margin-bottom: 11px;
+}
+
+label {
+  display: block;
+  color: #bbb;
+  font-size: 13px;
+  margin: 13px 0 7px;
+}
+
+input {
+  width: 100%;
+  padding: 13px;
+  border-radius: 11px;
+  border: 1px solid #393939;
+  background: #262626;
+  color: white;
+  font-size: 16px;
+}
+
+input:focus {
+  outline: none;
+  border-color: #4ade80;
+}
+
+input[type="date"] {
+  min-height: 45px;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0 12px;
+}
+
+button {
+  border: 0;
+  border-radius: 10px;
+  padding: 11px 13px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.primary {
+  background: #4ade80;
+  color: #111;
+}
+
+.secondary {
+  background: #353535;
+  color: #fff;
+}
+
+.danger {
+  background: #592626;
+  color: #ff9292;
+}
+
+.full {
+  width: 100%;
+  padding: 15px;
+  margin-top: 17px;
+}
+
+.small {
+  font-size: 12px;
+  padding: 9px 11px;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.actions button { flex: 1; }
+
+.tabs {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px;
+  margin-bottom: 20px;
+}
+
+.tab {
+  background: #282828;
+  color: #bbb;
+  padding: 12px 3px;
+  font-size: 12px;
+}
+
+.tab.active {
+  background: #4ade80;
+  color: #111;
+}
+
+.panel { display: none; }
+.panel.active { display: block; }
+
+.summaryLabel {
+  font-size: 11px;
+  color: #999;
+  letter-spacing: 0.5px;
+}
+
+.bigNumber {
+  font-size: 25px;
+  font-weight: 700;
+  margin: 8px 0;
+}
+
+.muted {
+  color: #999;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.name {
+  font-size: 15px;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.macros {
+  color: #aaa;
+  font-size: 12px;
+  line-height: 1.6;
+  margin-top: 8px;
+}
+
+.bar {
+  width: 100%;
+  height: 7px;
+  border-radius: 10px;
+  background: #363636;
+  overflow: hidden;
+  margin: 7px 0 13px;
+}
+
+.fill {
+  height: 100%;
+  border-radius: 10px;
+}
+
+.macroRow {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12px;
+}
+
+.empty {
+  text-align: center;
+  padding: 22px;
+  color: #888;
+  font-size: 13px;
+}
+
+.status {
+  color: #4ade80;
+  font-size: 13px;
+  text-align: center;
+  margin: 15px 0;
+  min-height: 20px;
+}
+
+.confirm {
+  background: #322020;
+  border-radius: 10px;
+  padding: 12px;
+  margin-top: 10px;
+}
+
+.confirmText {
+  color: #ffaaaa;
+  font-size: 13px;
+}
+
+.weekDay {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 11px 0;
+  border-bottom: 1px solid #333;
+}
+
+.weekDayName {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.weekDayValue {
+  color: #bbb;
+  font-size: 12px;
+}
+
+.statGrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.stat {
+  background: #252525;
+  padding: 12px;
+  border-radius: 10px;
+}
+
+.statValue {
+  font-size: 20px;
+  font-weight: 700;
+  margin-top: 6px;
+}
+
+.weightChart {
+  width: 100%;
+  height: 190px;
+  display: block;
+  margin-top: 12px;
+}
+
+.weightPoint {
+  fill: #4ade80;
+}
+
+.weightLine {
+  fill: none;
+  stroke: #4ade80;
+  stroke-width: 2.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.chartGrid {
+  stroke: #383838;
+  stroke-width: 1;
+}
+
+.chartText {
+  fill: #999;
+  font-size: 10px;
+}
+
+.weightChange {
+  font-size: 13px;
+  margin-top: 8px;
+}
+
+.footer {
+  text-align: center;
+  font-size: 12px;
+  color: #999;
+  margin-top: 30px;
+  line-height: 1.7;
+}
+</style>
+</head>
+
+<body>
+
+<h1>Macro Tracker</h1>
+<div class="subtitle">
+  Food logging, history, and analytics
+</div>
+
+<div class="tabs">
+  <button class="tab active"
+    onclick="switchTab('log')">
+    Log Food
+  </button>
+
+  <button class="tab"
+    onclick="switchTab('history')">
+    History
+  </button>
+
+  <button class="tab"
+    onclick="switchTab('analytics')">
+    Analytics
+  </button>
+
+  <button class="tab"
+    onclick="switchTab('weight')">
+    Weight
+  </button>
+</div>
+
+<div id="status" class="status"></div>
+
+<div id="log" class="panel active">
+
+  <div class="card">
+    <h2 id="formTitle">Add Food</h2>
+
+    <form id="foodForm">
+
+      <label>Food Name</label>
+      <input id="foodName"
+        type="text"
+        placeholder="Chicken & Rice">
+
+      <label>Calories</label>
+      <input id="calories"
+        type="number"
+        min="0"
+        step="any"
+        required
+        placeholder="0">
+
+      <div class="grid">
+
+        <div>
+          <label>Protein (g)</label>
+          <input id="protein"
+            type="number"
+            min="0"
+            step="any"
+            required
+            placeholder="0">
+        </div>
+
+        <div>
+          <label>Carbs (g)</label>
+          <input id="carbs"
+            type="number"
+            min="0"
+            step="any"
+            required
+            placeholder="0">
+        </div>
+
+        <div>
+          <label>Fat (g)</label>
+          <input id="fat"
+            type="number"
+            min="0"
+            step="any"
+            required
+            placeholder="0">
+        </div>
+
+      </div>
+
+      <button id="submitButton"
+        class="primary full"
+        type="submit">
+        Add Food
+      </button>
+
+    </form>
+
+    <div class="actions">
+      <button class="secondary"
+        onclick="saveCurrentAsFavorite()">
+        ☆ Save as Favorite
+      </button>
+
+      <button class="secondary"
+        onclick="resetForm()">
+        Clear
+      </button>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>⭐ Saved Foods</h2>
+    <div id="favorites"></div>
+  </div>
+
+  <div class="section">
+    <h2>Today's Progress</h2>
+    <div id="todayProgress"></div>
+  </div>
+
+</div>
+
+<div id="history" class="panel">
+
+  <div class="card">
+    <h2>Food History</h2>
+
+    <label>Select Date</label>
+    <input id="historyDate"
+      type="date"
+      onchange="renderHistory()">
+  </div>
+
+  <div id="historySummary"></div>
+  <div id="historyList"></div>
+
+</div>
+
+<div id="analytics" class="panel">
+
+  <h2>Last 7 Days</h2>
+
+  <div id="weeklyStats"></div>
+  <div id="weeklyDays"></div>
+
+</div>
+
+<!-- ========================================
+     WEIGHT TRACKER TAB
+========================================= -->
+
+<div id="weight" class="panel">
+
+  <div class="card">
+    <h2 id="weightFormTitle">Log Weight</h2>
+
+    <form id="weightForm">
+
+      <label for="weightDate">
+        Date
+      </label>
+      <input id="weightDate"
+        type="date"
+        required>
+
+      <label for="weightValue">
+        Body Weight (lb)
+      </label>
+      <input id="weightValue"
+        type="number"
+        min="1"
+        max="1500"
+        step="0.1"
+        inputmode="decimal"
+        placeholder="185.0"
+        required>
+
+      <button id="weightSubmitButton"
+        class="primary full"
+        type="submit">
+        Save Weight
+      </button>
+
+    </form>
+
+    <div class="actions">
+      <button class="secondary"
+        onclick="resetWeightForm()">
+        Clear
+      </button>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>Weight Overview</h2>
+    <div id="weightOverview"></div>
+  </div>
+
+  <div class="section">
+    <h2>30-Day Weight Trend</h2>
+    <div id="weightTrend"></div>
+  </div>
+
+  <div class="section">
+    <h2>Weight History</h2>
+    <div id="weightHistory"></div>
+  </div>
+
+</div>
+
+<div class="footer">
+  Tap <strong>Done</strong> at the top
+  to save changes.
+  <br>
+  Your notification updates automatically when you save before its set to send.
+</div>
+
+<script>
+
+const GOALS = __GOALS__;
+const initialEntries = __ENTRIES__;
+const initialFavorites = __FAVORITES__;
+const initialWeights = __WEIGHTS__;
+
+let foods = initialEntries.slice();
+let favorites = initialFavorites.slice();
+let weights = initialWeights.slice();
+
+let editingIndex = null;
+let editingWeightIndex = null;
+
+window.trackerPayload = "";
+
+function number(value) {
+  return Math.round(
+    (Number(value) || 0) * 10
+  ) / 10;
+}
+
+function dateKey(date) {
+  return (
+    date.getFullYear() + "-" +
+    String(date.getMonth() + 1)
+      .padStart(2, "0") + "-" +
+    String(date.getDate())
+      .padStart(2, "0")
+  );
+}
+
+function entryDateKey(entry) {
+  const date = new Date(entry.timestamp);
+
+  return isNaN(date.getTime())
+    ? ""
+    : dateKey(date);
+}
+
+function todayKey() {
+  return dateKey(new Date());
+}
+
+function setStatus(message) {
+  document.getElementById(
+    "status"
+  ).textContent = message;
+}
+
+function markDirty(message) {
+  window.trackerPayload = JSON.stringify({
+    entries: foods,
+    favorites: favorites,
+    weights: weights
+  });
+
+  setStatus(
+    message + " Tap Done to save."
+  );
+}
+
+function switchTab(id) {
+  document.querySelectorAll(
+    ".panel"
+  ).forEach(el => {
+    el.classList.remove("active");
+  });
+
+  document.querySelectorAll(
+    ".tab"
+  ).forEach(el => {
+    el.classList.remove("active");
+  });
+
+  document.getElementById(id)
+    .classList.add("active");
+
+  const index = {
+    log: 0,
+    history: 1,
+    analytics: 2,
+    weight: 3
+  }[id];
+
+  document.querySelectorAll(
+    ".tab"
+  )[index].classList.add("active");
+
+  renderAll();
+}
+
+function getTotals(key) {
+  const totals = {
+    calories: 0,
+    protein: 0,
+    carbs: 0,
+    fat: 0
+  };
+
+  foods.forEach(entry => {
+    if (entryDateKey(entry) !== key) {
+      return;
+    }
+
+    for (const macro of Object.keys(totals)) {
+      totals[macro] +=
+        Number(entry[macro]) || 0;
+    }
+  });
+
+  return totals;
+}
+
+function makeProgress(label, current, goal, color) {
+  const container = document.createElement("div");
+
+  const row = document.createElement("div");
+  row.className = "macroRow";
+
+  const left = document.createElement("span");
+  left.textContent = label;
+
+  const right = document.createElement("span");
+  right.textContent =
+    number(current) + " / " + goal;
+
+  row.appendChild(left);
+  row.appendChild(right);
+
+  const bar = document.createElement("div");
+  bar.className = "bar";
+
+  const fill = document.createElement("div");
+  fill.className = "fill";
+
+  fill.style.width =
+    Math.max(
+      0,
+      Math.min(current / goal, 1)
+    ) * 100 + "%";
+
+  fill.style.background = color;
+
+  bar.appendChild(fill);
+
+  container.appendChild(row);
+  container.appendChild(bar);
+
+  return container;
+}
+
+function makeSummary(totals) {
+  const card = document.createElement("div");
+  card.className = "card";
+
+  const label = document.createElement("div");
+  label.className = "summaryLabel";
+  label.textContent = "CALORIES";
+
+  const value = document.createElement("div");
+  value.className = "bigNumber";
+  value.textContent =
+    number(totals.calories) +
+    " / " + GOALS.calories;
+
+  card.appendChild(label);
+  card.appendChild(value);
+
+  [
+    ["Protein", "protein", "#60a5fa"],
+    ["Carbs", "carbs", "#facc15"],
+    ["Fat", "fat", "#fb923c"]
+  ].forEach(item => {
+    card.appendChild(
+      makeProgress(
+        item[0],
+        totals[item[1]],
+        GOALS[item[1]],
+        item[2]
+      )
+    );
+  });
+
+  return card;
+}
+
+function readForm() {
+  const entry = {
+    food:
+      document.getElementById("foodName")
+        .value.trim() || "Unnamed Food"
+  };
+
+  for (const key of [
+    "calories", "protein", "carbs", "fat"
+  ]) {
+    const input = document.getElementById(key);
+    const value = Number(input.value);
+
+    if (
+      input.value.trim() === "" ||
+      !Number.isFinite(value) ||
+      value < 0 ||
+      value > 100000
+    ) {
+      setStatus(
+        "Please enter valid macro values."
+      );
+      return null;
+    }
+
+    entry[key] = value;
+  }
+
+  return entry;
+}
+
+function fillForm(entry) {
+  document.getElementById("foodName")
+    .value = entry.food || "";
+
+  for (const key of [
+    "calories", "protein", "carbs", "fat"
+  ]) {
+    document.getElementById(key)
+      .value = entry[key] ?? 0;
+  }
+}
+
+function resetForm() {
+  editingIndex = null;
+
+  document.getElementById(
+    "foodForm"
+  ).reset();
+
+  document.getElementById(
+    "formTitle"
+  ).textContent = "Add Food";
+
+  document.getElementById(
+    "submitButton"
+  ).textContent = "Add Food";
+}
+
+document.getElementById("foodForm")
+  .addEventListener("submit", function(event) {
+    event.preventDefault();
+
+    const entry = readForm();
+
+    if (!entry) return;
+
+    if (editingIndex !== null) {
+      const old = foods[editingIndex];
+
+      if (!old) {
+        setStatus("Entry no longer exists.");
+        resetForm();
+        return;
+      }
+
+      foods[editingIndex] = {
+        ...old,
+        ...entry,
+        timestamp: old.timestamp
+      };
+
+      markDirty("✓ Food updated.");
+    } else {
+      entry.timestamp =
+        new Date().toISOString();
+
+      foods.push(entry);
+      markDirty("✓ Food added.");
+    }
+
+    resetForm();
+    renderAll();
+  });
+
+function saveCurrentAsFavorite() {
+  const entry = readForm();
+
+  if (!entry) return;
+
+  const existing = favorites.findIndex(
+    f => f.food.toLowerCase() ===
+      entry.food.toLowerCase()
+  );
+
+  if (existing >= 0) {
+    favorites[existing] = entry;
+    markDirty("✓ Saved food updated.");
+  } else {
+    favorites.push(entry);
+    markDirty("✓ Favorite added.");
+  }
+
+  renderFavorites();
+}
+
+function renderFavorites() {
+  const root = document.getElementById(
+    "favorites"
+  );
+
+  root.innerHTML = "";
+
+  if (favorites.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "empty";
+    empty.textContent =
+      "No saved foods yet.";
+
+    root.appendChild(empty);
+    return;
+  }
+
+  favorites.forEach((entry, index) => {
+    const card = document.createElement("div");
+    card.className = "card";
+
+    const name = document.createElement("div");
+    name.className = "name";
+    name.textContent = entry.food;
+
+    const macros = document.createElement("div");
+    macros.className = "macros";
+    macros.textContent =
+      number(entry.calories) + " cal | " +
+      number(entry.protein) + "g P | " +
+      number(entry.carbs) + "g C | " +
+      number(entry.fat) + "g F";
+
+    const actions = document.createElement("div");
+    actions.className = "actions";
+
+    const use = document.createElement("button");
+    use.className = "primary small";
+    use.textContent = "Quick Add";
+
+    use.onclick = function() {
+      foods.push({
+        ...entry,
+        timestamp: new Date().toISOString()
+      });
+
+      markDirty("✓ Saved food logged.");
+      renderAll();
+    };
+
+    const fill = document.createElement("button");
+    fill.className = "secondary small";
+    fill.textContent = "Fill Form";
+
+    fill.onclick = function() {
+      resetForm();
+      fillForm(entry);
+      switchTab("log");
+      window.scrollTo(0, 0);
+    };
+
+    const remove = document.createElement("button");
+    remove.className = "danger small";
+    remove.textContent = "Remove";
+
+    remove.onclick = function() {
+      showConfirmation(
+        card,
+        "Remove this saved food?",
+        function() {
+          favorites.splice(index, 1);
+          markDirty("✓ Favorite removed.");
+          renderFavorites();
+        }
+      );
+    };
+
+    actions.appendChild(use);
+    actions.appendChild(fill);
+    actions.appendChild(remove);
+
+    card.appendChild(name);
+    card.appendChild(macros);
+    card.appendChild(actions);
+
+    root.appendChild(card);
+  });
+}
+
+function showConfirmation(card, message, callback) {
+  const previous = card.querySelector(
+    ".confirm"
+  );
+
+  if (previous) {
+    previous.remove();
+    return;
+  }
+
+  const box = document.createElement("div");
+  box.className = "confirm";
+
+  const text = document.createElement("div");
+  text.className = "confirmText";
+  text.textContent = message;
+
+  const actions = document.createElement("div");
+  actions.className = "actions";
+
+  const cancel = document.createElement("button");
+  cancel.className = "secondary";
+  cancel.textContent = "Cancel";
+  cancel.onclick = function() {
+    box.remove();
+  };
+
+  const confirm = document.createElement("button");
+  confirm.className = "danger";
+  confirm.textContent = "Confirm";
+  confirm.onclick = callback;
+
+  actions.appendChild(cancel);
+  actions.appendChild(confirm);
+
+  box.appendChild(text);
+  box.appendChild(actions);
+  card.appendChild(box);
+}
+
+function renderHistory() {
+  const key = document.getElementById(
+    "historyDate"
+  ).value;
+
+  const summary = document.getElementById(
+    "historySummary"
+  );
+
+  const list = document.getElementById(
+    "historyList"
+  );
+
+  summary.innerHTML = "";
+  list.innerHTML = "";
+
+  summary.appendChild(
+    makeSummary(getTotals(key))
+  );
+
+  const selected = foods
+    .map((entry, index) => ({
+      entry,
+      index
+    }))
+    .filter(item =>
+      entryDateKey(item.entry) === key
+    )
+    .reverse();
+
+  if (selected.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "empty";
+    empty.textContent =
+      "No food logged on this date.";
+
+    list.appendChild(empty);
+    return;
+  }
+
+  selected.forEach(item => {
+    const entry = item.entry;
+
+    const card = document.createElement("div");
+    card.className = "card";
+
+    const name = document.createElement("div");
+    name.className = "name";
+    name.textContent =
+      entry.food || "Unnamed Food";
+
+    const time = document.createElement("div");
+    time.className = "muted";
+    time.textContent = new Date(
+      entry.timestamp
+    ).toLocaleTimeString([], {
+      hour: "numeric",
+      minute: "2-digit"
+    });
+
+    const macros = document.createElement("div");
+    macros.className = "macros";
+    macros.textContent =
+      number(entry.calories) + " cal | " +
+      number(entry.protein) + "g P | " +
+      number(entry.carbs) + "g C | " +
+      number(entry.fat) + "g F";
+
+    const actions = document.createElement("div");
+    actions.className = "actions";
+
+    const edit = document.createElement("button");
+    edit.className = "secondary";
+    edit.textContent = "Edit";
+
+    edit.onclick = function() {
+      editingIndex = item.index;
+      fillForm(entry);
+
+      document.getElementById(
+        "formTitle"
+      ).textContent = "Edit Food";
+
+      document.getElementById(
+        "submitButton"
+      ).textContent = "Save Changes";
+
+      switchTab("log");
+      window.scrollTo(0, 0);
+    };
+
+    const remove = document.createElement("button");
+    remove.className = "danger";
+    remove.textContent = "Delete";
+
+    remove.onclick = function() {
+      showConfirmation(
+        card,
+        "Permanently delete this entry?",
+        function() {
+          foods.splice(item.index, 1);
+          resetForm();
+          markDirty("✓ Food deleted.");
+          renderAll();
+        }
+      );
+    };
+
+    actions.appendChild(edit);
+    actions.appendChild(remove);
+
+    card.appendChild(name);
+    card.appendChild(time);
+    card.appendChild(macros);
+    card.appendChild(actions);
+
+    list.appendChild(card);
+  });
+}
+
+function renderAnalytics() {
+  const statsRoot = document.getElementById(
+    "weeklyStats"
+  );
+
+  const daysRoot = document.getElementById(
+    "weeklyDays"
+  );
+
+  statsRoot.innerHTML = "";
+  daysRoot.innerHTML = "";
+
+  const days = [];
+
+  const sums = {
+    calories: 0,
+    protein: 0,
+    carbs: 0,
+    fat: 0
+  };
+
+  let proteinGoalsMet = 0;
+  let daysLogged = 0;
+
+  for (let offset = 6; offset >= 0; offset--) {
+    const date = new Date();
+
+    date.setHours(12, 0, 0, 0);
+    date.setDate(date.getDate() - offset);
+
+    const key = dateKey(date);
+    const totals = getTotals(key);
+
+    const hasEntries = foods.some(
+      entry => entryDateKey(entry) === key
+    );
+
+    if (hasEntries) {
+      daysLogged++;
+    }
+
+    for (const macro of Object.keys(sums)) {
+      sums[macro] += totals[macro];
+    }
+
+    if (totals.protein >= GOALS.protein) {
+      proteinGoalsMet++;
+    }
+
+    days.push({date, totals});
+  }
+
+  const grid = document.createElement("div");
+  grid.className = "statGrid";
+
+  const statItems = [
+    ["Avg Calories", number(sums.calories / 7)],
+    ["Avg Protein", number(sums.protein / 7) + "g"],
+    ["Avg Carbs", number(sums.carbs / 7) + "g"],
+    ["Avg Fat", number(sums.fat / 7) + "g"],
+    ["Protein Goal Met", proteinGoalsMet + " / 7"],
+    ["Days Logged", daysLogged + " / 7"]
+  ];
+
+  statItems.forEach(item => {
+    const card = document.createElement("div");
+    card.className = "stat";
+
+    const label = document.createElement("div");
+    label.className = "summaryLabel";
+    label.textContent = item[0];
+
+    const value = document.createElement("div");
+    value.className = "statValue";
+    value.textContent = item[1];
+
+    card.appendChild(label);
+    card.appendChild(value);
+    grid.appendChild(card);
+  });
+
+  statsRoot.appendChild(grid);
+
+  const details = document.createElement("div");
+  details.className = "card";
+  details.style.marginTop = "15px";
+
+  const title = document.createElement("h2");
+  title.textContent = "Daily Breakdown";
+  details.appendChild(title);
+
+  days.forEach(day => {
+    const row = document.createElement("div");
+    row.className = "weekDay";
+
+    const left = document.createElement("div");
+    left.className = "weekDayName";
+
+    left.textContent = day.date.toLocaleDateString(
+      "en-US",
+      {
+        weekday: "short",
+        month: "short",
+        day: "numeric"
+      }
+    );
+
+    const right = document.createElement("div");
+    right.className = "weekDayValue";
+
+    right.textContent =
+      number(day.totals.calories) +
+      " cal | " +
+      number(day.totals.protein) +
+      "g protein";
+
+    row.appendChild(left);
+    row.appendChild(right);
+
+    details.appendChild(row);
+  });
+
+  daysRoot.appendChild(details);
+
+  const note = document.createElement("div");
+  note.className = "muted";
+
+  note.textContent =
+    "Averages include all seven days, " +
+    "including days without entries.";
+
+  daysRoot.appendChild(note);
+}
+
+function renderToday() {
+  const root = document.getElementById(
+    "todayProgress"
+  );
+
+  root.innerHTML = "";
+
+  root.appendChild(
+    makeSummary(getTotals(todayKey()))
+  );
+}
+
+// ============================================
+// WEIGHT TRACKER
+// ============================================
+
+function sortedWeights() {
+  return weights
+    .map((entry, index) => ({
+      entry,
+      index
+    }))
+    .filter(item =>
+      item.entry &&
+      typeof item.entry.date === "string" &&
+      Number.isFinite(Number(item.entry.weight)) &&
+      Number(item.entry.weight) > 0
+    )
+    .sort((a, b) =>
+      a.entry.date.localeCompare(b.entry.date)
+    );
+}
+
+function resetWeightForm() {
+  editingWeightIndex = null;
+
+  document.getElementById(
+    "weightForm"
+  ).reset();
+
+  document.getElementById(
+    "weightDate"
+  ).value = todayKey();
+
+  document.getElementById(
+    "weightFormTitle"
+  ).textContent = "Log Weight";
+
+  document.getElementById(
+    "weightSubmitButton"
+  ).textContent = "Save Weight";
+}
+
+document.getElementById("weightForm")
+  .addEventListener("submit", function(event) {
+    event.preventDefault();
+
+    const date = document.getElementById(
+      "weightDate"
+    ).value;
+
+    const input = document.getElementById(
+      "weightValue"
+    );
+
+    const weight = Number(input.value);
+
+    if (
+      !date ||
+      !/^\\d{4}-\\d{2}-\\d{2}$/.test(date) ||
+      !Number.isFinite(weight) ||
+      weight <= 0 ||
+      weight > 1500
+    ) {
+      setStatus(
+        "Please enter a valid date and weight."
+      );
+      return;
+    }
+
+    const duplicate = weights.findIndex(
+      (entry, index) =>
+        entry.date === date &&
+        index !== editingWeightIndex
+    );
+
+    if (duplicate >= 0) {
+      setStatus(
+        "A weight entry already exists for " +
+        "that date. Edit it instead."
+      );
+      return;
+    }
+
+    const record = {
+      date: date,
+      weight: number(weight)
+    };
+
+    if (editingWeightIndex !== null) {
+      weights[editingWeightIndex] = {
+        ...weights[editingWeightIndex],
+        ...record
+      };
+
+      markDirty("✓ Weight updated.");
+    } else {
+      weights.push(record);
+      markDirty("✓ Weight logged.");
+    }
+
+    resetWeightForm();
+    renderWeight();
+  });
+
+function weightStat(label, value) {
+  const card = document.createElement("div");
+  card.className = "stat";
+
+  const title = document.createElement("div");
+  title.className = "summaryLabel";
+  title.textContent = label;
+
+  const result = document.createElement("div");
+  result.className = "statValue";
+  result.textContent = value;
+
+  card.appendChild(title);
+  card.appendChild(result);
+
+  return card;
+}
+
+function renderWeightOverview() {
+  const root = document.getElementById(
+    "weightOverview"
+  );
+
+  root.innerHTML = "";
+
+  const sorted = sortedWeights();
+
+  if (sorted.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "empty";
+    empty.textContent =
+      "No weight entries yet. Log your first weigh-in.";
+
+    root.appendChild(empty);
+    return;
+  }
+
+  const first = sorted[0].entry;
+  const latest = sorted[sorted.length - 1].entry;
+
+  const today = todayKey();
+  const cutoff = new Date();
+  cutoff.setHours(12, 0, 0, 0);
+  cutoff.setDate(cutoff.getDate() - 6);
+
+  const cutoffKey = dateKey(cutoff);
+
+  const recent = sorted.filter(item =>
+    item.entry.date >= cutoffKey &&
+    item.entry.date <= today
+  );
+
+  const average = recent.length
+    ? recent.reduce(
+        (sum, item) =>
+          sum + Number(item.entry.weight),
+        0
+      ) / recent.length
+    : null;
+
+  const change =
+    Number(latest.weight) - Number(first.weight);
+
+  const grid = document.createElement("div");
+  grid.className = "statGrid";
+
+  grid.appendChild(
+    weightStat(
+      "LATEST WEIGHT",
+      number(latest.weight) + " lb"
+    )
+  );
+
+  grid.appendChild(
+    weightStat(
+      "7-DAY AVERAGE",
+      average === null
+        ? "—"
+        : number(average) + " lb"
+    )
+  );
+
+  grid.appendChild(
+    weightStat(
+      "STARTING WEIGHT",
+      number(first.weight) + " lb"
+    )
+  );
+
+  grid.appendChild(
+    weightStat(
+      "TOTAL CHANGE",
+      (change > 0 ? "+" : "") +
+      number(change) + " lb"
+    )
+  );
+
+  root.appendChild(grid);
+
+  const note = document.createElement("div");
+  note.className = "muted";
+  note.style.marginTop = "12px";
+
+  note.textContent =
+    "Latest weigh-in: " + latest.date +
+    ". The 7-day average uses recorded " +
+    "weigh-ins within the last seven days.";
+
+  root.appendChild(note);
+}
+
+function renderWeightTrend() {
+  const root = document.getElementById(
+    "weightTrend"
+  );
+
+  root.innerHTML = "";
+
+  const today = new Date();
+  today.setHours(12, 0, 0, 0);
+
+  const cutoff = new Date(today);
+  cutoff.setDate(cutoff.getDate() - 29);
+
+  const startKey = dateKey(cutoff);
+  const endKey = dateKey(today);
+
+  const recent = sortedWeights()
+    .filter(item =>
+      item.entry.date >= startKey &&
+      item.entry.date <= endKey
+    );
+
+  const card = document.createElement("div");
+  card.className = "card";
+
+  if (recent.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "empty";
+    empty.textContent =
+      "Log weigh-ins to see your 30-day trend.";
+
+    card.appendChild(empty);
+    root.appendChild(card);
+    return;
+  }
+
+  const values = recent.map(item =>
+    Number(item.entry.weight)
+  );
+
+  let min = Math.min(...values);
+  let max = Math.max(...values);
+
+  // Keep some vertical padding even if
+  // all weigh-ins have the same weight.
+  min = Math.floor((min - 1) * 2) / 2;
+  max = Math.ceil((max + 1) * 2) / 2;
+
+  if (max <= min) {
+    max = min + 2;
+  }
+
+  const width = 320;
+  const height = 190;
+
+  const left = 36;
+  const right = 12;
+  const top = 16;
+  const bottom = 28;
+
+  const plotWidth = width - left - right;
+  const plotHeight = height - top - bottom;
+
+  const MS_DAY = 86400000;
+
+  function utcDay(key) {
+    const parts = key.split("-").map(Number);
+    return Date.UTC(
+      parts[0],
+      parts[1] - 1,
+      parts[2]
+    );
+  }
+
+  const startDay = utcDay(startKey);
+  const endDay = utcDay(endKey);
+  const span = Math.max(1, endDay - startDay);
+
+  function xFor(key) {
+    return left +
+      (utcDay(key) - startDay) / span *
+      plotWidth;
+  }
+
+  function yFor(weight) {
+    return top +
+      (max - weight) / (max - min) *
+      plotHeight;
+  }
+
+  const NS = "http://www.w3.org/2000/svg";
+
+  function svgElement(name, attributes) {
+    const element = document.createElementNS(
+      NS, name
+    );
+
+    Object.keys(attributes).forEach(key => {
+      element.setAttribute(
+        key,
+        attributes[key]
+      );
+    });
+
+    return element;
+  }
+
+  const svg = svgElement("svg", {
+    viewBox: "0 0 " + width + " " + height,
+    class: "weightChart",
+    role: "img",
+    "aria-label": "Weight trend over 30 days"
+  });
+
+  for (let i = 0; i <= 3; i++) {
+    const y = top +
+      (plotHeight / 3) * i;
+
+    const value = max -
+      ((max - min) / 3) * i;
+
+    const line = svgElement("line", {
+      x1: left,
+      y1: y,
+      x2: width - right,
+      y2: y,
+      class: "chartGrid"
+    });
+
+    const text = svgElement("text", {
+      x: 2,
+      y: y + 3,
+      class: "chartText"
+    });
+
+    text.textContent = number(value);
+
+    svg.appendChild(line);
+    svg.appendChild(text);
+  }
+
+  const points = recent.map(item => ({
+    x: xFor(item.entry.date),
+    y: yFor(Number(item.entry.weight))
+  }));
+
+  if (points.length > 1) {
+    const polyline = svgElement("polyline", {
+      points: points.map(p =>
+        p.x + "," + p.y
+      ).join(" "),
+      class: "weightLine"
+    });
+
+    svg.appendChild(polyline);
+  }
+
+  points.forEach(point => {
+    const circle = svgElement("circle", {
+      cx: point.x,
+      cy: point.y,
+      r: 3.5,
+      class: "weightPoint"
+    });
+
+    svg.appendChild(circle);
+  });
+
+  const startLabel = svgElement("text", {
+    x: left,
+    y: height - 5,
+    class: "chartText"
+  });
+
+  startLabel.textContent =
+    startKey.slice(5);
+
+  const endLabel = svgElement("text", {
+    x: width - right,
+    y: height - 5,
+    "text-anchor": "end",
+    class: "chartText"
+  });
+
+  endLabel.textContent =
+    endKey.slice(5);
+
+  svg.appendChild(startLabel);
+  svg.appendChild(endLabel);
+
+  card.appendChild(svg);
+
+  const note = document.createElement("div");
+  note.className = "muted";
+
+  note.textContent =
+    "Each point represents a recorded weigh-in. " +
+    "Missing days are not treated as zero.";
+
+  card.appendChild(note);
+  root.appendChild(card);
+}
+
+function renderWeightHistory() {
+  const root = document.getElementById(
+    "weightHistory"
+  );
+
+  root.innerHTML = "";
+
+  const sorted = sortedWeights().reverse();
+
+  if (sorted.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "empty";
+    empty.textContent =
+      "No weigh-ins recorded.";
+
+    root.appendChild(empty);
+    return;
+  }
+
+  sorted.forEach(item => {
+    const entry = item.entry;
+
+    const card = document.createElement("div");
+    card.className = "card";
+
+    const name = document.createElement("div");
+    name.className = "name";
+    name.textContent =
+      number(entry.weight) + " lb";
+
+    const date = document.createElement("div");
+    date.className = "muted";
+    date.textContent = entry.date;
+
+    const actions = document.createElement("div");
+    actions.className = "actions";
+
+    const edit = document.createElement("button");
+    edit.className = "secondary";
+    edit.textContent = "Edit";
+
+    edit.onclick = function() {
+      editingWeightIndex = item.index;
+
+      document.getElementById(
+        "weightDate"
+      ).value = entry.date;
+
+      document.getElementById(
+        "weightValue"
+      ).value = entry.weight;
+
+      document.getElementById(
+        "weightFormTitle"
+      ).textContent = "Edit Weight";
+
+      document.getElementById(
+        "weightSubmitButton"
+      ).textContent = "Save Changes";
+
+      switchTab("weight");
+      window.scrollTo(0, 0);
+    };
+
+    const remove = document.createElement("button");
+    remove.className = "danger";
+    remove.textContent = "Delete";
+
+    remove.onclick = function() {
+      showConfirmation(
+        card,
+        "Permanently delete this weigh-in?",
+        function() {
+          weights.splice(item.index, 1);
+
+          resetWeightForm();
+          markDirty("✓ Weight deleted.");
+          renderWeight();
+        }
+      );
+    };
+
+    actions.appendChild(edit);
+    actions.appendChild(remove);
+
+    card.appendChild(name);
+    card.appendChild(date);
+    card.appendChild(actions);
+
+    root.appendChild(card);
+  });
+}
+
+function renderWeight() {
+  renderWeightOverview();
+  renderWeightTrend();
+  renderWeightHistory();
+}
+
+// ============================================
+// RENDER EVERYTHING
+// ============================================
+
+function renderAll() {
+  renderFavorites();
+  renderToday();
+  renderHistory();
+  renderAnalytics();
+  renderWeight();
+}
+
+document.getElementById(
+  "historyDate"
+).value = todayKey();
+
+document.getElementById(
+  "weightDate"
+).value = todayKey();
+
+renderAll();
+
+</script>
+</body>
+</html>
+`;
+
+const preparedHTML = html
+  .replace("__GOALS__", safeJSON(GOALS))
+  .replace("__ENTRIES__", safeJSON(entries))
+  .replace("__FAVORITES__", safeJSON(savedFoods))
+  .replace("__WEIGHTS__", safeJSON(weightEntries));
+
+// ============================================
+// DISPLAY FORM
+// ============================================
+
+const webView = new WebView();
+
+await webView.loadHTML(preparedHTML);
+await webView.present(false);
+
+// ============================================
+// READ CHANGES
+// ============================================
+
+const rawPayload = await webView.evaluateJavaScript(
+  "window.trackerPayload || ''",
+  false
+);
+
+if (!rawPayload) {
+  Script.complete();
+  return;
+}
+
+const payload = JSON.parse(rawPayload);
+
+if (
+  !payload ||
+  !Array.isArray(payload.entries) ||
+  !Array.isArray(payload.favorites) ||
+  !Array.isArray(payload.weights)
+) {
+  throw new Error(
+    "Invalid tracker update. Nothing was saved."
+  );
+}
+
+// ============================================
+// SAVE DATA
+// ============================================
+
+fm.writeString(
+  logPath,
+  JSON.stringify(payload.entries, null, 2)
+);
+
+fm.writeString(
+  savedPath,
+  JSON.stringify(payload.favorites, null, 2)
+);
+
+fm.writeString(
+  weightPath,
+  JSON.stringify(payload.weights, null, 2)
+);
+
+// ============================================
+// TODAY'S TOTALS
+// ============================================
+
+const now = new Date();
+const today = localDateKey(now);
+
+const totals = totalsForDate(
+  payload.entries,
+  today
+);
+
+const todayEntries = payload.entries.filter(
+  entry => {
+    const date = new Date(entry.timestamp);
+
+    return !isNaN(date.getTime()) &&
+      localDateKey(date) === today;
+  }
+);
+
+// ============================================
+// AUTOMATIC 8 PM NOTIFICATION
+// ============================================
+
+async function updateDailyNotification() {
+  // Remove any previous pending summary.
+  // We replace it with the latest totals.
+  await Notification.removePending([
+    NOTIFICATION_ID
+  ]);
+
+  const scheduledTime = new Date();
+
+  scheduledTime.setHours(
+    NOTIFICATION_HOUR,
+    NOTIFICATION_MINUTE,
+    0,
+    0
+  );
+
+  // No notification if already past 8 PM.
+  if (new Date() >= scheduledTime) {
+    return "Past 8 PM";
+  }
+
+  // No notification if nothing is logged today.
+  if (todayEntries.length === 0) {
+    return "No food logged today";
+  }
+
+  const notification = new Notification();
+
+  notification.identifier = NOTIFICATION_ID;
+
+  notification.title =
+    "Daily Macro Summary";
+
+  function remaining(key, unit) {
+    const difference =
+      GOALS[key] - totals[key];
+
+    if (difference >= 0) {
+      return round(difference) +
+        unit + " left";
+    }
+
+    return round(Math.abs(difference)) +
+      unit + " over";
+  }
+
+  notification.body =
+    "Calories: " +
+    round(totals.calories) +
+    " / " + GOALS.calories + "\n" +
+
+    "Protein: " +
+    round(totals.protein) +
+    " / " + GOALS.protein + "g\n" +
+
+    "Carbs: " +
+    round(totals.carbs) +
+    " / " + GOALS.carbs + "g\n" +
+
+    "Fat: " +
+    round(totals.fat) +
+    " / " + GOALS.fat + "g\n\n" +
+
+    "Remaining:\n" +
+
+    "Calories: " +
+    remaining("calories", "") + "\n" +
+
+    "Protein: " +
+    remaining("protein", "g") + "\n" +
+
+    "Carbs: " +
+    remaining("carbs", "g") + "\n" +
+
+    "Fat: " +
+    remaining("fat", "g");
+
+  notification.sound = "default";
+
+  notification.setTriggerDate(
+    scheduledTime
+  );
+
+  await notification.schedule();
+
+  return "Scheduled. ";
+}
+
+let notificationStatus = "";
+
+try {
+  notificationStatus =
+    await updateDailyNotification();
+} catch (error) {
+  notificationStatus =
+    "Notification could not be scheduled";
+
+  console.log(
+    "Notification error: " + error
+  );
+}
+
+// ============================================
+// SAVE CONFIRMATION
+// ============================================
+
+const alert = new Alert();
+
+alert.title = "Macro Tracker Saved!";
+
+alert.message =
+  "Today's Totals\n\n" +
+
+  "Calories: " +
+  round(totals.calories) +
+  " / " + GOALS.calories + "\n" +
+
+  "Protein: " +
+  round(totals.protein) +
+  " / " + GOALS.protein + "g\n" +
+
+  "Carbs: " +
+  round(totals.carbs) +
+  " / " + GOALS.carbs + "g\n" +
+
+  "Fat: " +
+  round(totals.fat) +
+  " / " + GOALS.fat + "g\n\n" +
+
+  "Notification:\n" +
+  notificationStatus;
+
+alert.addAction("Done");
+
+await alert.present();
+
+Script.complete();
